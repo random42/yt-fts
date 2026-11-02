@@ -23,11 +23,32 @@ from .db_utils import (
     delete_channel
 )
 from . import __version__ as YT_FTS_VERSION
+from .yt_dlp_version import get_update_notice
 
 console = Console()
 
+
+def show_version(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+
+    click.echo(f"yt-fts {YT_FTS_VERSION}")
+    click.echo(f"Python interpreter: {sys.executable}")
+    try:
+        from yt_dlp.version import __version__ as yt_dlp_version
+    except ImportError:
+        click.echo("yt-dlp is not installed")
+    else:
+        click.echo(f"yt-dlp {yt_dlp_version}")
+        notice = get_update_notice(yt_dlp_version)
+        if notice:
+            click.secho(notice, fg="yellow", err=True)
+    ctx.exit()
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(YT_FTS_VERSION, message='yt_fts version: %(version)s')
+@click.option("--version", is_flag=True, callback=show_version, expose_value=False,
+              is_eager=True, help="Show yt-fts and yt-dlp versions")
 def cli() -> None:
     pass
 

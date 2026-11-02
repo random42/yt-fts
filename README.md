@@ -1,6 +1,6 @@
 # yt-fts - YouTube Full Text Search 
 
-This project is **abandoned** until unemployment inevitably finds me again.
+This is a personal maintenance fork of [the upstream project](https://github.com/NotJoeMartinez/yt-fts), which is no longer maintained.
 
 `yt-fts` is a command line program that uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to scrape all of a YouTube 
 channels subtitles and load them into a sqlite database that is searchable from the command line. It allows you to
@@ -17,13 +17,52 @@ It also supports semantic search via the [OpenAI embeddings API](https://beta.op
 
 https://github.com/NotJoeMartinez/yt-fts/assets/39905973/6ffd8962-d060-490f-9e73-9ab179402f14
 
-## Installation 
+## Installation
 
-pip 
+This is a maintenance fork of the abandoned upstream project. Python 3.10–3.14 are supported; Python 3.15 is not yet supported because the pinned Chroma dependency requires `onnxruntime`, which has no Python 3.15 wheel. Install this fork rather than the unrelated `yt-fts` release on PyPI:
 
 ```bash
-pip install yt-fts
+git clone https://github.com/random42/yt-fts.git
+cd yt-fts
+python -m pip install .
 ```
+
+For an existing pip installation, pull the fork and reinstall it into the same Python environment:
+
+```bash
+cd /path/to/yt-fts
+git pull
+yt-fts --version
+# Use the Python interpreter printed above:
+/path/to/python -m pip install --upgrade .
+```
+
+`yt-fts --version` reports the application version, the Python interpreter running it, and installed yt-dlp version. It checks PyPI's latest stable yt-dlp release with a two-second timeout and a 2 MB response cap, and gives an upgrade command when a newer release exists; offline or malformed responses are ignored. Set `YT_FTS_SKIP_UPDATE_CHECK=1` to skip the check entirely. This check never installs or changes packages. You can upgrade yt-dlp independently of an yt-fts release by running the printed interpreter's command, for example:
+
+```bash
+/path/to/python -m pip install --upgrade 'yt-dlp[default]>=2026.10.21'
+```
+
+With uv, point `uv pip` at the interpreter reported by `yt-fts --version`:
+
+```bash
+uv pip install --python /path/to/python --upgrade 'yt-dlp[default]>=2026.10.21'
+```
+
+For an isolated uv tool environment, install this checkout as the editable source and repeat the install after pulling updates:
+
+```bash
+cd /path/to/yt-fts
+uv tool install --editable .
+# After git pull:
+uv tool install --editable . --force
+```
+
+The `yt-dlp[default]` extra supplies yt-dlp's EJS components. You also need a supported JavaScript runtime for YouTube challenge solving. Deno 2.3+ is recommended and enabled by default. yt-fts uses yt-dlp's Python API, so CLI configuration for Node.js does not affect yt-fts. See the [yt-dlp EJS guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS) for current runtime guidance. Downloads still depend on YouTube's current behavior; no offline check can guarantee live compatibility.
+
+### Dependabot updates
+
+Dependabot proposes daily yt-dlp and weekly GitHub Actions updates. On personal forks, explicitly enable Dependabot in the repository's **Settings → Security → Code security and analysis → Dependabot** settings. These pull requests update repository dependency requirements; they do not update already-installed environments. Review each update and wait for CI to pass before merging. Automatic merging is not enabled.
 
 ## Commands
 

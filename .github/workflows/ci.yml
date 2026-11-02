@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            yt-dlp-version: "2026.10.21"
+          - python-version: "3.14"
+            yt-dlp-version: latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create disposable home
+        run: mkdir -p "${RUNNER_TEMP}/yt-fts-home/.config"
+      - name: Install this checkout and test tools
+        env:
+          HOME: ${{ runner.temp }}/yt-fts-home
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest build
+          if [ "${{ matrix.yt-dlp-version }}" != "latest" ]; then
+            python -m pip install --upgrade "yt-dlp[default]==${{ matrix.yt-dlp-version }}"
+          fi
+      - name: Check CLI startup
+        env:
+          HOME: ${{ runner.temp }}/yt-fts-home
+          YT_FTS_SKIP_UPDATE_CHECK: "1"
+        run: |
+          yt-fts --help
+          yt-fts --version
+      - name: Run isolated offline regression tests
+        env:
+          HOME: ${{ runner.temp }}/yt-fts-home
+        run: python -m pytest -q tests/offline
+      - name: Build distributions
+        run: python -m build
