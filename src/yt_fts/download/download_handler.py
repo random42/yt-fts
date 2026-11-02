@@ -3,15 +3,16 @@ import os
 import sys
 import json
 import random
+import re
 import sqlite3
 import tempfile
 
 import requests
 import yt_dlp
+import click
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from xml.etree import ElementTree
 
@@ -49,10 +50,13 @@ class DownloadHandler:
 
     def download_channel(self, url: str) -> None:
 
-        self.validate_channel_url(url)
-        self.session = self.init_session(url)
-        self.channel_id = self.get_channel_id(url)
-        self.channel_name = self.get_channel_name(self.channel_id)
+        try:
+            channel_url = self.validate_channel_url(url)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        self.channel_id = self.get_channel_id(channel_url)
+        self.session = self.init_session(channel_url)
+        self.channel_name = self.channel_name or self.get_channel_name(self.channel_id)
 
         if check_if_channel_exists(self.channel_id):
             self.console.print(f"[yellow]Channel '{self.channel_name}' already exists in database. Updating instead...[/yellow]")
@@ -158,27 +162,32 @@ class DownloadHandler:
         handle_reject_consent_cookie(url, s)
         return s
 
-    def get_channel_id(self, url: str) -> str | None:
-
+    def get_channel_id(self, url: str) -> str:
         try:
-            session = self.session
-            res = session.get(url)
-            if res.status_code == 200:
-                html = res.text
-                soup = BeautifulSoup(html, 'html.parser')
-                meta_tag = soup.find('meta', property='og:url')
-                if meta_tag:
-                    content_url = meta_tag['content']
-                else:
-                    self.console.print('Error: Could not find channel url')
-                    return None
-
-                channel_id = content_url.split('/')[-1]
-                return channel_id
-
+            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'extract_flat': True}) as ydl:
+                info = ydl.extract_info(url, download=False, process=False)
+                for _ in range(5):
+                    if not isinstance(info, dict) or info.get('_type') not in ('url', 'url_transparent'):
+                        break
+                    redirect_url = info.get('url')
+                    if not isinstance(redirect_url, str):
+                        break
+                    try:
+                        redirect_url = self.validate_channel_url(redirect_url)
+                    except ValueError:
+                        break
+                    info = ydl.extract_info(redirect_url, download=False, process=False)
         except Exception as e:
-            self.console.print(f'Error: {e}')
+            self.console.print(f"[red]Error resolving channel URL: {e}[/red]")
             sys.exit(1)
+
+        channel_id = info.get('channel_id') if isinstance(info, dict) else None
+        if not isinstance(channel_id, str) or not re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', channel_id):
+            self.console.print("[red]Error: Could not resolve a valid YouTube channel ID from this URL[/red]")
+            sys.exit(1)
+
+        self.channel_name = (info.get('channel') or info.get('uploader')) if isinstance(info, dict) else None
+        return channel_id
 
     def get_channel_name(self, channel_id: str) -> str:
 
@@ -524,38 +533,25 @@ class DownloadHandler:
         self.console.print("6. Update yt-dlp: pip install --upgrade yt-dlp")
 
     def validate_channel_url(self, channel_url: str) -> str:
-        channel_url = channel_url.strip('/')
-        parsed = urlparse(channel_url)
-        domain = parsed.netloc
-        path = parsed.path.split('/')
+        parsed = urlparse(channel_url.strip())
+        supported_hosts = {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'}
+        if (parsed.scheme not in {'http', 'https'} or parsed.hostname not in supported_hosts
+                or parsed.port not in (None, 80, 443) or parsed.username or parsed.password):
+            raise ValueError(f"Invalid YouTube channel URL: {channel_url}")
 
-        if not domain.endswith('youtube.com'):
-            self.console.print("")
-            self.console.print(f"[bold red]Error:[/bold red] Invalid channel domain: [blue]{domain}[/blue]")
-            self.console.print("")
-            sys.exit(1)
+        parts = [part for part in parsed.path.split('/') if part]
+        if len(parts) == 1 and parts[0].startswith('@'):
+            channel_path = parts[0]
+        elif len(parts) == 2 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]):
+            channel_path = f'channel/{parts[1]}'
+        elif len(parts) == 2 and parts[0].startswith('@') and parts[1] == 'videos':
+            channel_path = parts[0]
+        elif len(parts) == 3 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]) and parts[2] == 'videos':
+            channel_path = f'channel/{parts[1]}'
+        else:
+            raise ValueError(f"Invalid YouTube channel URL: {channel_url}")
 
-        if len(path) < 2:
-            self.console.print("")
-            self.console.print(f"[bold red]Error:[/bold red] Invalid channel url: [blue]{channel_url}[/blue]")
-            self.console.print("")
-            sys.exit(1)
-
-        if path[1].startswith("@"):
-            return f"https://www.youtube.com/{path[1]}/videos"
-
-        if path[1] == "channel":
-            return f"https://www.youtube.com/channel/{path[2]}/videos"
-
-        self.console.print("")
-        self.console.print(f"[bold red]Error:[/bold red] Unknown url format: [blue]{channel_url}[/blue]")
-        self.console.print("")
-        self.console.print("Please use one of the following formats:")
-        self.console.print("")
-        self.console.print("    - https://www.youtube.com/[yellow]@channelname[/yellow]")
-        self.console.print("    - https://www.youtube.com/channel/[yellow]channelId[/yellow]")
-        self.console.print("")
-        sys.exit(1)
+        return f"https://www.youtube.com/{channel_path}/videos"
 
 
     @property
