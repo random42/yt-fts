@@ -218,7 +218,7 @@ def handle_reject_consent_cookie(channel_url: str, s) -> None:
     """
     Auto rejects the consent cookie if request is redirected to the consent page
     """
-    r = s.get(channel_url)
+    r = s.get(channel_url, timeout=10)
     if "https://consent.youtube.com" in r.url:
         m = re.search(r"<input type=\"hidden\" name=\"bl\" value=\"([^\"]*)\"", r.text)
         if m:
@@ -231,4 +231,4 @@ def handle_reject_consent_cookie(channel_url: str, s) -> None:
                 "hl": "de",
                 "set_eom": "true"
             }
-            s.post("https://consent.youtube.com/save", data=data)
+            s.post("https://consent.youtube.com/save", data=data, timeout=10)

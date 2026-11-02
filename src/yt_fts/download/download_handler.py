@@ -55,8 +55,12 @@ class DownloadHandler:
         except ValueError as e:
             raise click.ClickException(str(e)) from e
         self.channel_id = self.get_channel_id(channel_url)
-        self.session = self.init_session(channel_url)
-        self.channel_name = self.channel_name or self.get_channel_name(self.channel_id)
+        if not self.channel_name:
+            try:
+                self.session = self.init_session(channel_url)
+                self.channel_name = self.get_channel_name(self.channel_id)
+            except requests.RequestException as e:
+                raise click.ClickException(f"Could not get channel name: {e}") from e
 
         if check_if_channel_exists(self.channel_id):
             self.console.print(f"[yellow]Channel '{self.channel_name}' already exists in database. Updating instead...[/yellow]")
@@ -163,8 +167,12 @@ class DownloadHandler:
         return s
 
     def get_channel_id(self, url: str) -> str:
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
+        if self.cookies_from_browser is not None:
+            ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
+
         try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'extract_flat': True}) as ydl:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False, process=False)
                 for _ in range(5):
                     if not isinstance(info, dict) or info.get('_type') not in ('url', 'url_transparent'):
@@ -192,13 +200,18 @@ class DownloadHandler:
     def get_channel_name(self, channel_id: str) -> str:
 
         session = self.session
-        res = session.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
+        res = session.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=10)
 
         if res.status_code == 200:
             with self.console.status("[bold green]Parsing Feed...") as status:
-                tree = ElementTree.fromstring(res.content)
-                channel_name = tree.find('./{*}author/{*}name').text
-                return channel_name
+                try:
+                    tree = ElementTree.fromstring(res.content)
+                except ElementTree.ParseError as e:
+                    raise click.ClickException("YouTube returned an invalid channel feed") from e
+                name = tree.find('./{*}author/{*}name')
+                if name is None or not name.text:
+                    raise click.ClickException("YouTube channel feed does not contain a channel name")
+                return name.text
         else:
             self.console.print("[red]Error:[/red] "
                                "couldn't get the channel name or channel doesn't exist")
@@ -540,11 +553,11 @@ class DownloadHandler:
             raise ValueError(f"Invalid YouTube channel URL: {channel_url}")
 
         parts = [part for part in parsed.path.split('/') if part]
-        if len(parts) == 1 and parts[0].startswith('@'):
+        if len(parts) == 1 and parts[0].startswith('@') and len(parts[0]) > 1:
             channel_path = parts[0]
         elif len(parts) == 2 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]):
             channel_path = f'channel/{parts[1]}'
-        elif len(parts) == 2 and parts[0].startswith('@') and parts[1] == 'videos':
+        elif len(parts) == 2 and parts[0].startswith('@') and len(parts[0]) > 1 and parts[1] == 'videos':
             channel_path = parts[0]
         elif len(parts) == 3 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]) and parts[2] == 'videos':
             channel_path = f'channel/{parts[1]}'
