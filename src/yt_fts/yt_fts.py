@@ -67,8 +67,8 @@ def cli() -> None:
               help="Download all videos from a playlist")
 @click.option("-l", "--language", default="en",
               help="Language of the subtitles to download")
-@click.option("-j", "--jobs", type=int, default=8,
-              help="Number of parallel download jobs (default: 8, recommended: 4-16 for most users)")
+@click.option("-j", "--jobs", type=click.IntRange(min=1), default=2,
+              help="Parallel download jobs (default: 2; fewer jobs are slower but reduce rate-limit risk)")
 @click.option("--cookies-from-browser", default=None,
               help="Browser to extract cookies from. Ex: chrome, firefox")
 def download(url: str, playlist: bool, language: str, jobs: int, cookies_from_browser: str | None) -> None:
@@ -103,8 +103,8 @@ def download(url: str, playlist: bool, language: str, jobs: int, cookies_from_br
 @click.option("-u", "--test-url", default="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 @click.option("--cookies-from-browser", default=None,
               help="Browser to extract cookies from. Ex: chrome, firefox")
-@click.option("-j", "--jobs", type=int, default=8,
-              help="Number of parallel download jobs to test with")
+@click.option("-j", "--jobs", type=click.IntRange(min=1), default=2,
+              help="Number of parallel download jobs to test with (default: 2)")
 def diagnose(test_url: str, cookies_from_browser: str | None, jobs: int) -> None:
     from .download.download_handler import DownloadHandler
     
@@ -156,7 +156,7 @@ def list(transcript: str | None, channel: str | None, library: bool) -> None:
 @click.option("-l", "--language",
               default="en", help="Language of the subtitles to download")
 @click.option("-j", "jobs",
-              type=int, default=8, help="Number of parallel download jobs (default: 8, recommended: 4-16 for most users)")
+              type=click.IntRange(min=1), default=2, help="Parallel download jobs (default: 2; fewer jobs are slower but reduce rate-limit risk)")
 @click.option("--cookies-from-browser",
               default=None,
               help="Browser to extract cookies from. Ex: chrome, firefox")

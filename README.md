@@ -75,7 +75,7 @@ that request you to sign in. You can also run the `update` command several times
 
 ```bash
 # Download channel
-yt-fts download --jobs 5 "https://www.youtube.com/@3blue1brown"
+yt-fts download --jobs 2 "https://www.youtube.com/@3blue1brown"
 yt-fts download --cookies-from-browser firefox "https://www.youtube.com/@3blue1brown"
 
 # Download playlist
@@ -85,7 +85,7 @@ yt-fts download --playlist "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD
 **Options:**
 - `-p, --playlist`: Download all videos from a playlist
 - `-l, --language`: Language of the subtitles to download (default: en)
-- `-j, --jobs`: Number of parallel download jobs (default: 8, recommended: 4-16)
+- `-j, --jobs`: Number of parallel download jobs (default: 2). More jobs can increase rate limits.
 - `--cookies-from-browser`: Browser to extract cookies from (chrome, firefox, etc.)
 
 ### `diagnose`
@@ -101,7 +101,7 @@ yt-fts diagnose --test-url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --cooki
 **Options:**
 - `-u, --test-url`: URL to test with (default: https://www.youtube.com/watch?v=dQw4w9WgXcQ)
 - `--cookies-from-browser`: Browser to extract cookies from
-- `-j, --jobs`: Number of parallel download jobs to test with (default: 8)
+- `-j, --jobs`: Number of parallel download jobs to test with (default: 2)
 
 ### `list`
 List saved channels, videos, and transcripts.
@@ -137,13 +137,13 @@ Keep in mind some might not have subtitles enabled. This command will still atte
 yt-fts update
 
 # Update specific channel
-yt-fts update --channel "3Blue1Brown" --jobs 5
+yt-fts update --channel "3Blue1Brown" --jobs 2
 ```
 
 **Options:**
 - `-c, --channel`: The name or id of the channel to update
 - `-l, --language`: Language of the subtitles to download (default: en)
-- `-j, --jobs`: Number of parallel download jobs (default: 8)
+- `-j, --jobs`: Number of parallel download jobs (default: 2). More jobs can increase rate limits.
 - `--cookies-from-browser`: Browser to extract cookies from
 
 ### `delete`

@@ -6,35 +6,72 @@ import random
 import re
 import sqlite3
 import tempfile
+import threading
+import time
 
 import requests
 import yt_dlp
 import click
 
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 from ..config import get_db_path
 from ..db_utils import (
-    add_video,
     add_channel_info,
     check_if_channel_exists,
     get_channel_id_from_input,
-    get_num_vids,
     get_vid_ids_by_channel_id,
     get_channels
 )
 
 from ..utils import parse_vtt, get_date, handle_reject_consent_cookie
 
-from rich.progress import track
 from rich.console import Console
 
 
 class DownloadHandler:
-    def __init__(self, number_of_jobs: int = 8, language: str = 'en', cookies_from_browser: str | None = None) -> None:
+    _pace_lock = threading.Lock()
+    _next_request_at = 0.0
+    _cooldown_until = 0.0
+    _request_interval = 1.0
+
+    @classmethod
+    def _pace_request(cls) -> None:
+        while True:
+            with cls._pace_lock:
+                now = time.monotonic()
+                ready = max(cls._next_request_at, cls._cooldown_until)
+                if ready <= now:
+                    cls._next_request_at = now + cls._request_interval
+                    return
+                wait = ready - now
+            time.sleep(wait)
+
+    @classmethod
+    def _rate_limit_cooldown(cls, seconds: float) -> None:
+        with cls._pace_lock:
+            cls._cooldown_until = max(cls._cooldown_until, time.monotonic() + seconds)
+
+    def _youtube_dl(self, options):
+        handler = self
+
+        class PacedYoutubeDL(yt_dlp.YoutubeDL):
+            def urlopen(self, request):
+                handler._pace_request()
+                try:
+                    return super().urlopen(request)
+                except Exception as error:
+                    if "429" in str(error) or "too many requests" in str(error).lower():
+                        handler._rate_limit_cooldown(10)
+                    raise
+
+        return PacedYoutubeDL(options)
+
+    def __init__(self, number_of_jobs: int = 2, language: str = 'en', cookies_from_browser: str | None = None) -> None:
 
         self.console = Console()
 
@@ -77,9 +114,8 @@ class DownloadHandler:
                 "vtt files[/green]"
             )
 
-            self.download_vtts()
             add_channel_info(self.channel_id, self.channel_name, channel_url)
-            self.vtt_to_db()
+            self.download_vtts()
 
         self.console.print(f"[green]Finished downloading subtitles for {self.channel_name}[/green]")
 
@@ -103,7 +139,6 @@ class DownloadHandler:
                                "vtt files[/bold][/green]\n")
             self.tmp_dir = tmp_dir
             self.download_vtts()
-            self.vtt_to_db()
 
     def update_channel(self, target_channel: str | int) -> None:
 
@@ -124,17 +159,10 @@ class DownloadHandler:
                 raise click.ClickException(f"Could not get channel name: {e}") from e
             self.console.print(f"Updating channel: {self.channel_name}")
             public_video_ids = self.get_videos_list(channel_url)
-            num_public_vids = len(public_video_ids)
-            num_local_vids = get_num_vids(self.channel_id)
-
-            if num_public_vids == num_local_vids:
-                self.console.print("[yellow]No new videos to download[/yellow]")
-                return
-
             local_vid_ids = get_vid_ids_by_channel_id(self.channel_id)
-            local_vid_ids = [i[0] for i in local_vid_ids]
+            local_vid_ids = {i[0] for i in local_vid_ids}
 
-            fresh_videos = [i for i in public_video_ids if i not in local_vid_ids]
+            fresh_videos = [i for i in dict.fromkeys(public_video_ids) if i not in local_vid_ids]
             self.video_ids = fresh_videos
 
             self.console.print(f"Found {len(fresh_videos)} videos on \"{self.channel_name}\" not in the database")
@@ -166,16 +194,19 @@ class DownloadHandler:
 
     def init_session(self, url: str) -> requests.Session:
         s = requests.session()
+        self._pace_request()
         handle_reject_consent_cookie(url, s)
         return s
 
     def get_channel_id(self, url: str) -> str:
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True,
+                    'sleep_interval_requests': 1, 'retries': 0, 'extractor_retries': 0}
         if self.cookies_from_browser is not None:
             ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with self._youtube_dl(ydl_opts) as ydl:
+                self._pace_request()
                 info = ydl.extract_info(url, download=False, process=False)
                 for _ in range(5):
                     if not isinstance(info, dict) or info.get('_type') not in ('url', 'url_transparent'):
@@ -187,6 +218,7 @@ class DownloadHandler:
                         redirect_url = self.validate_channel_url(redirect_url)
                     except ValueError:
                         break
+                    self._pace_request()
                     info = ydl.extract_info(redirect_url, download=False, process=False)
         except Exception as e:
             self.console.print(f"[red]Error resolving channel URL: {e}[/red]")
@@ -203,6 +235,7 @@ class DownloadHandler:
     def get_channel_name(self, channel_id: str) -> str:
 
         session = self.session
+        self._pace_request()
         res = session.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=10)
 
         if res.status_code == 200:
@@ -227,18 +260,20 @@ class DownloadHandler:
                     'User-Agent': random.choice(self._user_agents)
                 },
                 'extract_flat': True,
+                'sleep_interval_requests': 1,
                 'quiet': True,
-                'nocheckcertificate': True,
                 'sleep_interval': 1,
                 'max_sleep_interval': 3,
-                'retries': 3,
+                'retries': 0,
+                'extractor_retries': 0,
             }
 
             if self.cookies_from_browser is not None:
                 ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
 
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with self._youtube_dl(ydl_opts) as ydl:
+                    self._pace_request()
                     info = ydl.extract_info(channel_url, download=False)
                     if info and 'entries' in info:
                         list_of_videos_urls = [entry['id'] for entry in info['entries'] if entry]
@@ -261,7 +296,8 @@ class DownloadHandler:
             # Try to get streams as well
             streams_url = channel_url.replace("/videos", "/streams")
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with self._youtube_dl(ydl_opts) as ydl:
+                    self._pace_request()
                     streams_info = ydl.extract_info(streams_url, download=False)
                     if streams_info and 'entries' in streams_info:
                         live_stream_urls = [entry['id'] for entry in streams_info['entries'] if entry]
@@ -280,9 +316,15 @@ class DownloadHandler:
                 },
                 'quiet': True,
                 'extract_flat': True,
+                'sleep_interval_requests': 1,
+                'retries': 0,
+                'extractor_retries': 0,
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if self.cookies_from_browser is not None:
+                ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
+            with self._youtube_dl(ydl_opts) as ydl:
+                self._pace_request()
                 info = ydl.extract_info(playlist_url, download=False)
                 playlist_data = []
                 for entry in info['entries']:
@@ -298,16 +340,11 @@ class DownloadHandler:
         return playlist_data
 
     def download_vtts(self) -> None:
-        executor = ThreadPoolExecutor(self.number_of_jobs)
-        futures = []
-
-        for video_id in self.video_ids:
-            video_url = f'https://www.youtube.com/watch?v={video_id}'
-            future = executor.submit(self.get_vtt, self.tmp_dir, video_url, self.language)
-            futures.append(future)
-
-        for i in range(len(self.video_ids)):
-            futures[i].result()
+        with ThreadPoolExecutor(self.number_of_jobs) as executor:
+            futures = {executor.submit(self.get_vtt, self.tmp_dir, f'https://www.youtube.com/watch?v={video_id}', self.language): video_id for video_id in self.video_ids}
+            for future in as_completed(futures):
+                if future.result():
+                    self.vtt_to_db({futures[future]})
 
     def quiet_progress_hook(self, d: dict) -> None:
         console = self.console
@@ -315,143 +352,70 @@ class DownloadHandler:
             file_name = Path(d['filename']).name
             console.print(f" -> \"{file_name}\"")
 
-    def get_vtt(self, tmp_dir: str, video_url: str, language: str) -> None:
-        max_retries = 3
-        retry_delay = 2  # seconds
-        
-        for attempt in range(max_retries):
+    def get_vtt(self, tmp_dir: str, video_url: str, language: str) -> bool:
+        ydl_opts = {
+            'outtmpl': f'{tmp_dir}/%(id)s',
+            'writeinfojson': True,
+            'writeautomaticsub': True,
+            'subtitlesformat': 'vtt',
+            'skip_download': True,
+            'subtitleslangs': ['en', '-live_chat'],
+            'quiet': True,
+            'no_warnings': True,
+            'progress_hooks': [self.quiet_progress_hook],
+            'ignoreerrors': False,
+            'sleep_interval_requests': 1,
+            'sleep_interval_subtitles': 1,
+            'retries': 0,
+            'fragment_retries': 0,
+            'extractor_retries': 0,
+        }
+        if self.cookies_from_browser is not None:
+            ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
+
+        for attempt in range(3):
             try:
-                ydl_opts = {
-                    'http_headers': {
-                        'User-Agent': random.choice(self._user_agents)
-                    },
-                    'outtmpl': f'{tmp_dir}/%(id)s',
-                    'writeinfojson': True,
-                    'writeautomaticsub': True,
-                    'subtitlesformat': 'vtt',
-                    'skip_download': True,
-                    'subtitleslangs': ['en', '-live_chat'],  # Only English, prefer auto-generated
-                    'quiet': True,
-                    'no_warnings': True,
-                    'progress_hooks': [self.quiet_progress_hook],
-                    'nocheckcertificate': True,
-                    'ignoreerrors': False,
-                    'no_color': True,
-                    'sleep_interval': 1,
-                    'max_sleep_interval': 5,
-                    'retries': 3,
-                    'fragment_retries': 3,
-                    'skip_unavailable_fragments': True,
-                }
+                self._pace_request()
+                with self._youtube_dl(ydl_opts) as ydl:
+                    result = ydl.download([video_url])
+                if result:
+                    self.console.print(f"[red]Subtitle download failed for {video_url}[/red]")
+                    return False
+                return True
+            except Exception as error:
+                message = str(error)
+                self.console.print(f"[yellow]Attempt {attempt + 1}/3 failed for {video_url}: {message}[/yellow]")
+                if "429" not in message and "too many requests" not in message.lower():
+                    return False
+                self._rate_limit_cooldown(10 * (attempt + 1))
+        return False
 
-                if self.cookies_from_browser is not None:
-                    ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
-
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # First, let's check what subtitles are available
-                    info = ydl.extract_info(video_url, download=False)
-                    if info:
-                        available_subs = info.get('subtitles', {}).keys()
-                        auto_subs = info.get('automatic_captions', {}).keys()
-                        if not available_subs and not auto_subs:
-                            self.console.print(f"[yellow]No subtitles available for {video_url}[/yellow]")
-                            return
-                   
-                    ydl.download([video_url])
-                
-                return
-
-            except Exception as e:
-                error_msg = str(e)
-                self.console.print(f"[yellow]Attempt {attempt + 1}/{max_retries} failed for: {video_url}[/yellow]")
-                self.console.print(f"[red]Warning: {error_msg}[/red]")
-                
-                # Check if it's a 403 error specifically
-                if "403" in error_msg or "Forbidden" in error_msg:
-                    self.console.print(f"[red]403 Forbidden error detected - YouTube is blocking the request[/red]")
-                    self.console.print(f"[yellow]Possible causes:[/yellow]")
-                    self.console.print(f"  - Rate limiting (too many requests too quickly)")
-                    self.console.print(f"  - Missing or invalid cookies")
-                    self.console.print(f"  - IP address is blocked")
-                    self.console.print(f"  - User-Agent detection")
-                    
-                    if attempt < max_retries - 1:
-                        self.console.print(f"[yellow]Waiting {retry_delay} seconds before retry...[/yellow]")
-                        import time
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        self.console.print(f"[red]All retry attempts failed for: {video_url}[/red]")
-                        self.console.print(f"[yellow]Suggestions:[/yellow]")
-                        self.console.print(f"  - Try using --cookies-from-browser option")
-                        self.console.print(f"  - Reduce the number of parallel jobs (-j option)")
-                        self.console.print(f"  - Wait a few minutes before trying again")
-                        self.console.print(f"  - Check if the video is available in your region")
-                
-                elif "429" in error_msg or "Too Many Requests" in error_msg:
-                    self.console.print(f"[red]429 Too Many Requests - Rate limit exceeded[/red]")
-                    if attempt < max_retries - 1:
-                        wait_time = retry_delay * 5  # Longer wait for rate limits
-                        self.console.print(f"[yellow]Waiting {wait_time} seconds before retry...[/yellow]")
-                        import time
-                        time.sleep(wait_time)
-                        retry_delay *= 2
-                    else:
-                        self.console.print(f"[red]Rate limit exceeded for: {video_url}[/red]")
-                        self.console.print(f"[yellow]Try reducing parallel jobs or wait longer[/yellow]")
-                
-                else:
-                    # For other errors, just retry with normal delay
-                    if attempt < max_retries - 1:
-                        self.console.print(f"[yellow]Waiting {retry_delay} seconds before retry...[/yellow]")
-                        import time
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                    else:
-                        self.console.print(f"[red]Failed to get: {video_url}[/red]")
-                        self.console.print(f"[red]Error: {error_msg}[/red]")
-
-    def vtt_to_db(self) -> None:
-
-        tmp_dir = self.tmp_dir
-
-        items = os.listdir(tmp_dir)
-        file_paths = [os.path.join(tmp_dir, item) for item in items if item.endswith('.vtt')]
-
-        con = sqlite3.connect(get_db_path())
-        cur = con.cursor()
-
-        for vtt in track(file_paths, description="Adding subtitles to database..."):
-            base_name = os.path.basename(vtt)
-
-            vid_id = base_name.split('.')[0]
-            vid_url = f"https://youtu.be/{vid_id}"
-
-            vid_json_path = os.path.join(os.path.dirname(vtt), f'{vid_id}.info.json')
-
-            with open(vid_json_path, 'r', encoding='utf-8', errors='ignore') as f:
-                vid_json = json.load(f)
-
-            vid_title = vid_json['title']
-            vid_date = get_date(vid_json['upload_date'])
-            channel_id = vid_json['channel_id']
-
-            add_video(channel_id, vid_id, vid_title, vid_url, vid_date)
-
-            vtt_json = parse_vtt(vtt)
-
-            for sub in vtt_json:
-                start_time = sub['start_time']
-                stop_time = sub['stop_time']
-                text = sub['text']
-                cur.execute("""
-                            INSERT INTO Subtitles (video_id, start_time, stop_time, text) 
-                            VALUES (?, ?, ?, ?)
-                            """, (vid_id, start_time, stop_time, text))
-
-            con.commit()
-
-        con.close()
+    def vtt_to_db(self, video_ids: set[str] | None = None) -> int:
+        imported = 0
+        with closing(sqlite3.connect(get_db_path())) as con:
+            for vtt in sorted(Path(self.tmp_dir).glob('*.vtt')):
+                vid_id = vtt.name.split('.')[0]
+                if video_ids is not None and vid_id not in video_ids:
+                    continue
+                with open(vtt.with_name(f'{vid_id}.info.json'), encoding='utf-8') as info_file:
+                    info = json.load(info_file)
+                subtitles = parse_vtt(str(vtt))
+                if not subtitles:
+                    continue
+                # One transaction per transcript: interruption leaves the video retryable.
+                with con:
+                    if con.execute("SELECT 1 FROM Subtitles WHERE video_id = ? LIMIT 1", (vid_id,)).fetchone():
+                        continue
+                    con.execute(
+                        "INSERT OR IGNORE INTO Videos (video_id, video_title, video_url, video_date, channel_id) VALUES (?, ?, ?, ?, ?)",
+                        (vid_id, info['title'], f"https://youtu.be/{vid_id}", get_date(info['upload_date']), info['channel_id']),
+                    )
+                    con.executemany(
+                        "INSERT INTO Subtitles (video_id, start_time, stop_time, text) VALUES (?, ?, ?, ?)",
+                        [(vid_id, sub['start_time'], sub['stop_time'], sub['text']) for sub in subtitles],
+                    )
+                imported += 1
+        return imported
 
     def diagnose_403_errors(self, test_url: str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ") -> None:
         """
@@ -491,7 +455,7 @@ class DownloadHandler:
             if self.cookies_from_browser is not None:
                 ydl_opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with self._youtube_dl(ydl_opts) as ydl:
                 info = ydl.extract_info(test_url, download=False)
                 if info:
                     self.console.print("[green]✓ yt-dlp info extraction successful[/green]")
@@ -512,7 +476,7 @@ class DownloadHandler:
                     'quiet': True,
                     'no_warnings': True,
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with self._youtube_dl(ydl_opts) as ydl:
                     # Just test cookie extraction, don't download
                     self.console.print("[green]✓ Cookie extraction appears to be working[/green]")
             except Exception as e:
