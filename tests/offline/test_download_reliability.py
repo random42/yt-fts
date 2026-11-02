@@ -74,14 +74,14 @@ def test_get_vtt_uses_one_download_call_and_disables_internal_retries(handler, m
 
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def download(self, urls):
-            seen.append(urls)
-            return 0
+        def extract_info(self, url, download=False):
+            seen.append(url)
+            return {"requested_subtitles": {"en": {}}}
 
     monkeypatch.setattr("yt_fts.download.download_handler.yt_dlp.YoutubeDL", YDL)
     monkeypatch.setattr(handler, "_pace_request", lambda: None)
     assert handler.get_vtt("/tmp", "https://youtu.be/vid", "en")
-    assert seen[1] == ["https://youtu.be/vid"]
+    assert seen[1] == "https://youtu.be/vid"
     assert {key: seen[0][key] for key in ("retries", "fragment_retries", "extractor_retries")} == {
         "retries": 0, "fragment_retries": 0, "extractor_retries": 0
     }
@@ -99,8 +99,8 @@ def test_get_vtt_bounds_rate_limit_retries_and_stops_permanent_errors(handler, m
         def __init__(self, options): pass
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def download(self, urls):
-            calls.append(urls)
+        def extract_info(self, url, download=False):
+            calls.append(url)
             error = errors.pop(0)
             raise error
 
@@ -108,7 +108,7 @@ def test_get_vtt_bounds_rate_limit_retries_and_stops_permanent_errors(handler, m
     monkeypatch.setattr("yt_fts.download.download_handler.yt_dlp.YoutubeDL", YDL)
     monkeypatch.setattr(handler, "_pace_request", lambda: None)
     monkeypatch.setattr(handler, "_rate_limit_cooldown", cooldowns.append)
-    assert handler.get_vtt("/tmp", "https://youtu.be/vid", "en") is False
+    assert handler.get_vtt("/tmp", "https://youtu.be/vid", "en") in ("rate limited", "other failure", "unavailable")
     assert len(calls) == expected
     assert cooldowns == ([10, 20, 30] if expected == 3 else [])
 
@@ -163,7 +163,7 @@ def test_update_compares_ids_when_remote_and_local_counts_match(handler, monkeyp
     monkeypatch.setattr("yt_fts.download.download_handler.get_vid_ids_by_channel_id", lambda channel: [("old",)])
     monkeypatch.setattr(handler, "get_videos_list", lambda url: ["new"])
     seen = []
-    monkeypatch.setattr(handler, "download_vtts", lambda: seen.extend(handler.video_ids))
+    monkeypatch.setattr(handler, "download_vtts", lambda: seen.extend(handler.video_ids) or __import__("yt_fts.download.download_handler", fromlist=["DownloadResult"]).DownloadResult())
     handler.update_channel("UC" + "a" * 22)
     assert seen == ["new"]
 

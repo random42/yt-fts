@@ -30,7 +30,8 @@ def test_active_download_and_discovery_share_transport_cooldown(monkeypatch):
     handler = DownloadHandler()
     # This instance is already active when discovery encounters a rate limit.
     active_worker = handler._youtube_dl({})
-    assert handler.get_videos_list("https://youtube.com/channel/id/videos") == ["video"]
+    with pytest.raises(RuntimeError, match="429"):
+        handler.get_videos_list("https://youtube.com/channel/id/videos")
     deadline = DownloadHandler._cooldown_until
     assert deadline > now[0]
     active_worker.urlopen("subtitle")

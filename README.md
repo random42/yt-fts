@@ -71,7 +71,18 @@ Download subtitles for a channel or playlist.
 
 Takes a channel or playlist URL as an argument. Specify the number of jobs to parallelize the download with the `--jobs` flag. 
 Use the `--cookies-from-browser` to use cookies from your browser in the requests, will help if you're getting errors 
-that request you to sign in. You can also run the `update` command several times to gradually get more videos into the database. 
+that request you to sign in. You can also run the `update` command several times to gradually get more videos into the database.
+
+Downloads report imported, skipped, and failed video counts. Imported counts include only committed transcripts.
+Videos without captions and previously saved videos count as skipped. Empty discovery results and absent captions are successful outcomes.
+
+Exit codes:
+- `0`: Success, including empty results and skipped videos.
+- `1`: Discovery failed, or failures occurred without any imports.
+- `2`: Some transcripts were imported, but other videos failed.
+
+Completed imports remain saved after a failure. Retry the download command, or use `yt-fts update` for saved channels.
+For rate limits, wait before retrying and reduce `--jobs`.
 
 ```bash
 # Download channel
@@ -130,7 +141,8 @@ yt-fts list --library
 ### `update`
 Update subtitles for all channels in the library or a specific channel. 
 
-Keep in mind some might not have subtitles enabled. This command will still attempt to download subtitles as subtitles are sometimes added later.
+Videos without captions count as skipped. Discovery errors remain distinct from successful results without new videos.
+Updates use the download exit codes above. An update of all channels continues after individual channel failures.
 
 ```bash
 # Update all channels

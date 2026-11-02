@@ -1,5 +1,4 @@
 
-import os
 import sys
 import json
 import random
@@ -8,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 
 import requests
 import yt_dlp
@@ -31,6 +31,17 @@ from ..db_utils import (
 from ..utils import parse_vtt, get_date, handle_reject_consent_cookie
 
 from rich.console import Console
+
+
+@dataclass
+class DownloadResult:
+    imported: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if not self.failed else (2 if self.imported else 1)
 
 
 class DownloadHandler:
@@ -85,7 +96,7 @@ class DownloadHandler:
         self.video_ids: list[str] | None = None
         self.tmp_dir: str | None = None
 
-    def download_channel(self, url: str) -> None:
+    def download_channel(self, url: str) -> DownloadResult:
 
         try:
             channel_url = self.validate_channel_url(url)
@@ -101,13 +112,15 @@ class DownloadHandler:
 
         if check_if_channel_exists(self.channel_id):
             self.console.print(f"[yellow]Channel '{self.channel_name}' already exists in database. Updating instead...[/yellow]")
-            self.update_channel(self.channel_id)
-            return
+            return self.update_channel(self.channel_id)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             self.tmp_dir = tmp_dir
             channel_url = f"https://www.youtube.com/channel/{self.channel_id}/videos"
-            self.video_ids = self.get_videos_list(channel_url)
+            try:
+                self.video_ids = self.get_videos_list(channel_url)
+            except Exception as error:
+                raise click.ClickException(f"Video discovery failed: {error}") from error
 
             self.console.print(
                 f"[green]Downloading [red]{len(self.video_ids)}[/red] "
@@ -115,15 +128,20 @@ class DownloadHandler:
             )
 
             add_channel_info(self.channel_id, self.channel_name, channel_url)
-            self.download_vtts()
+            result = self.download_vtts()
 
+        self.report_result(result)
         self.console.print(f"[green]Finished downloading subtitles for {self.channel_name}[/green]")
+        return result
 
-    def download_playlist(self, playlist_url: str, language: str, number_of_jobs: int) -> None:
+    def download_playlist(self, playlist_url: str, language: str, number_of_jobs: int) -> DownloadResult:
         self.language = language
         self.number_of_jobs = number_of_jobs
 
-        playlist_data = self.get_playlist_data(playlist_url)
+        try:
+            playlist_data = self.get_playlist_data(playlist_url)
+        except Exception as error:
+            raise click.ClickException(f"Playlist discovery failed: {error}") from error
 
         for video in playlist_data:
             channel_name = video["channel_name"]
@@ -136,11 +154,13 @@ class DownloadHandler:
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             self.console.print(f"[green][bold]Downloading [red]{len(playlist_data)}[/red] "
-                               "vtt files[/bold][/green]\n")
+                               "videos[/bold][/green]\n")
             self.tmp_dir = tmp_dir
-            self.download_vtts()
+            result = self.download_vtts()
+        self.report_result(result)
+        return result
 
-    def update_channel(self, target_channel: str | int) -> None:
+    def update_channel(self, target_channel: str | int, raise_failure: bool = True) -> DownloadResult:
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             self.tmp_dir = tmp_dir
@@ -158,7 +178,10 @@ class DownloadHandler:
             except requests.RequestException as e:
                 raise click.ClickException(f"Could not get channel name: {e}") from e
             self.console.print(f"Updating channel: {self.channel_name}")
-            public_video_ids = self.get_videos_list(channel_url)
+            try:
+                public_video_ids = self.get_videos_list(channel_url)
+            except Exception as error:
+                raise click.ClickException(f"Video discovery failed: {error}") from error
             local_vid_ids = get_vid_ids_by_channel_id(self.channel_id)
             local_vid_ids = {i[0] for i in local_vid_ids}
 
@@ -168,18 +191,9 @@ class DownloadHandler:
             self.console.print(f"Found {len(fresh_videos)} videos on \"{self.channel_name}\" not in the database")
             self.console.print(f"Downloading {len(fresh_videos)} new videos from \"{self.channel_name}\"")
 
-            self.download_vtts()
-
-            vtt_to_parse = os.listdir(self.tmp_dir)
-
-            if len(vtt_to_parse) == 0:
-                self.console.print("No new videos saved")
-                self.console.print(f"{len(fresh_videos)} videos on \"{self.channel_name}\" do not have subtitles")
-                return
-
-            self.vtt_to_db()
-
-            self.console.print(f"Added {len(vtt_to_parse)} new videos from \"{self.channel_name}\" to the database")
+            result = self.download_vtts()
+            self.report_result(result, raise_failure=raise_failure)
+            return result
 
     def update_all_channels(self) -> None:
 
@@ -187,10 +201,18 @@ class DownloadHandler:
         all_channels = get_channels()
         all_channel_row_ids = [i[0] for i in all_channels]
 
+        failed = imported = skipped = 0
         for channel_row_id in all_channel_row_ids:
-            self.update_channel(channel_row_id)
-
-        self.console.print("[green]Finished updating all channels[/green]")
+            try:
+                result = self.update_channel(channel_row_id, raise_failure=False)
+                if result:
+                    imported += result.imported
+                    skipped += result.skipped
+                    failed += result.failed
+            except click.ClickException as error:
+                failed += 1
+                self.console.print(f"[red]{error}[/red]")
+        self.report_result(DownloadResult(imported=imported, skipped=skipped, failed=failed))
 
     def init_session(self, url: str) -> requests.Session:
         s = requests.session()
@@ -249,9 +271,7 @@ class DownloadHandler:
                     raise click.ClickException("YouTube channel feed does not contain a channel name")
                 return name.text
         else:
-            self.console.print("[red]Error:[/red] "
-                               "couldn't get the channel name or channel doesn't exist")
-            sys.exit(1)
+            raise click.ClickException(f"Could not get channel name: HTTP {res.status_code}")
 
     def get_videos_list(self, channel_url: str) -> list[str]:
         with self.console.status("[bold green]Scraping video urls ...") as status:
@@ -278,8 +298,7 @@ class DownloadHandler:
                     if info and 'entries' in info:
                         list_of_videos_urls = [entry['id'] for entry in info['entries'] if entry]
                     else:
-                        self.console.print("[red]Error: Could not extract video list from channel[/red]")
-                        return []
+                        raise RuntimeError("Could not extract video list from channel")
             except Exception as e:
                 error_msg = str(e)
                 if "403" in error_msg or "Forbidden" in error_msg:
@@ -291,7 +310,7 @@ class DownloadHandler:
                     self.console.print("  - Rate limiting")
                 else:
                     self.console.print(f"[red]Error scraping videos: {error_msg}[/red]")
-                return []
+                raise RuntimeError(f"Could not discover channel videos: {error_msg}") from e
 
             # Try to get streams as well
             streams_url = channel_url.replace("/videos", "/streams")
@@ -299,12 +318,17 @@ class DownloadHandler:
                 with self._youtube_dl(ydl_opts) as ydl:
                     self._pace_request()
                     streams_info = ydl.extract_info(streams_url, download=False)
+                    if not isinstance(streams_info, dict) or 'entries' not in streams_info:
+                        raise RuntimeError("Could not extract stream list from channel")
                     if streams_info and 'entries' in streams_info:
                         live_stream_urls = [entry['id'] for entry in streams_info['entries'] if entry]
                         if len(live_stream_urls) > 0:
                             list_of_videos_urls.extend(live_stream_urls)
-            except Exception:
-                self.console.print("[yellow]No streams found[/yellow]")
+            except Exception as error:
+                message = str(error).lower()
+                if "does not have a streams tab" not in message:
+                    raise RuntimeError(f"Could not discover channel streams: {error}") from error
+                self.console.print("[yellow]No streams found (tab unavailable)[/yellow]")
 
         return list_of_videos_urls
 
@@ -326,8 +350,12 @@ class DownloadHandler:
             with self._youtube_dl(ydl_opts) as ydl:
                 self._pace_request()
                 info = ydl.extract_info(playlist_url, download=False)
+                if not isinstance(info, dict) or 'entries' not in info:
+                    raise RuntimeError("Could not extract playlist entries")
                 playlist_data = []
                 for entry in info['entries']:
+                    if not entry:
+                        raise RuntimeError("Playlist contains an unavailable entry; discovery is incomplete")
                     vid_obj = {
                         'channel_name': entry['channel'],
                         'channel_id': entry['channel_id'],
@@ -339,12 +367,42 @@ class DownloadHandler:
 
         return playlist_data
 
-    def download_vtts(self) -> None:
+    def download_vtts(self) -> DownloadResult:
+        result = DownloadResult()
         with ThreadPoolExecutor(self.number_of_jobs) as executor:
-            futures = {executor.submit(self.get_vtt, self.tmp_dir, f'https://www.youtube.com/watch?v={video_id}', self.language): video_id for video_id in self.video_ids}
+            futures = {executor.submit(self.get_vtt, self.tmp_dir, f'https://www.youtube.com/watch?v={video_id}', self.language): video_id for video_id in dict.fromkeys(self.video_ids or [])}
             for future in as_completed(futures):
-                if future.result():
-                    self.vtt_to_db({futures[future]})
+                video_id = futures[future]
+                try:
+                    status = future.result()
+                    if status == "ready":
+                        imported = self.vtt_to_db({video_id})
+                        if imported:
+                            result.imported += imported
+                        else:
+                            with closing(sqlite3.connect(get_db_path())) as con:
+                                saved = con.execute("SELECT 1 FROM Subtitles WHERE video_id = ? LIMIT 1", (video_id,)).fetchone()
+                            if not saved:
+                                raise ValueError("Requested captions produced no usable subtitle records")
+                            result.skipped += 1
+                            self.console.print(f"Skipped {video_id}: already present")
+                    elif status == "no captions":
+                        result.skipped += 1
+                        self.console.print(f"Skipped {video_id}: no captions")
+                    else:
+                        result.failed += 1
+                        self.console.print(f"[red]Failed {video_id}: {status}[/red]")
+                except Exception as error:
+                    result.failed += 1
+                    self.console.print(f"[red]Failed {video_id}: import/download error: {error}[/red]")
+        return result
+
+    def report_result(self, result: DownloadResult, raise_failure: bool = True) -> None:
+        self.console.print(f"Results: {result.imported} imported, {result.skipped} skipped (no captions/already present), {result.failed} failed")
+        if result.failed:
+            self.console.print("Retry the download command, or use 'yt-fts update' for saved channels. For rate limits, wait and use fewer --jobs.")
+            if raise_failure:
+                raise click.exceptions.Exit(result.exit_code)
 
     def quiet_progress_hook(self, d: dict) -> None:
         console = self.console
@@ -352,7 +410,7 @@ class DownloadHandler:
             file_name = Path(d['filename']).name
             console.print(f" -> \"{file_name}\"")
 
-    def get_vtt(self, tmp_dir: str, video_url: str, language: str) -> bool:
+    def get_vtt(self, tmp_dir: str, video_url: str, language: str) -> str:
         ydl_opts = {
             'outtmpl': f'{tmp_dir}/%(id)s',
             'writeinfojson': True,
@@ -377,18 +435,19 @@ class DownloadHandler:
             try:
                 self._pace_request()
                 with self._youtube_dl(ydl_opts) as ydl:
-                    result = ydl.download([video_url])
-                if result:
-                    self.console.print(f"[red]Subtitle download failed for {video_url}[/red]")
-                    return False
-                return True
+                    info = ydl.extract_info(video_url, download=True)
+                if not info:
+                    return "unavailable"
+                if not info.get("requested_subtitles"):
+                    return "no captions"
+                return "ready"
             except Exception as error:
                 message = str(error)
                 self.console.print(f"[yellow]Attempt {attempt + 1}/3 failed for {video_url}: {message}[/yellow]")
                 if "429" not in message and "too many requests" not in message.lower():
-                    return False
+                    return "unavailable" if any(word in message.lower() for word in ("unavailable", "private", "removed")) else "other failure"
                 self._rate_limit_cooldown(10 * (attempt + 1))
-        return False
+        return "rate limited"
 
     def vtt_to_db(self, video_ids: set[str] | None = None) -> int:
         imported = 0
