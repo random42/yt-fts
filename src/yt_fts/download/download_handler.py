@@ -117,8 +117,11 @@ class DownloadHandler:
                 self.channel_id = get_channel_id_from_input(target_channel)
                 
             channel_url = f"https://www.youtube.com/channel/{self.channel_id}/videos"
-            self.session = self.init_session(channel_url)
-            self.channel_name = self.get_channel_name(self.channel_id)
+            try:
+                self.session = self.init_session(channel_url)
+                self.channel_name = self.get_channel_name(self.channel_id)
+            except requests.RequestException as e:
+                raise click.ClickException(f"Could not get channel name: {e}") from e
             self.console.print(f"Updating channel: {self.channel_name}")
             public_video_ids = self.get_videos_list(channel_url)
             num_public_vids = len(public_video_ids)
@@ -557,9 +560,9 @@ class DownloadHandler:
             channel_path = parts[0]
         elif len(parts) == 2 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]):
             channel_path = f'channel/{parts[1]}'
-        elif len(parts) == 2 and parts[0].startswith('@') and len(parts[0]) > 1 and parts[1] == 'videos':
+        elif len(parts) == 2 and parts[0].startswith('@') and len(parts[0]) > 1 and parts[1] in {'videos', 'streams', 'shorts', 'live', 'featured', 'playlists', 'channels', 'about'}:
             channel_path = parts[0]
-        elif len(parts) == 3 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]) and parts[2] == 'videos':
+        elif len(parts) == 3 and parts[0] == 'channel' and re.fullmatch(r'UC[a-zA-Z0-9_-]{22}', parts[1]) and parts[2] in {'videos', 'streams', 'shorts', 'live', 'featured', 'playlists', 'channels', 'about'}:
             channel_path = f'channel/{parts[1]}'
         else:
             raise ValueError(f"Invalid YouTube channel URL: {channel_url}")

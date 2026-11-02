@@ -48,11 +48,16 @@ def test_invalid_channel_urls_are_rejected_before_resolution(handler, monkeypatc
         ("www.youtube.com", "/@creator/"),
         ("m.youtube.com", "/channel/" + CHANNEL_ID + "/videos/"),
         ("music.youtube.com", "/channel/" + CHANNEL_ID),
+        ("www.youtube.com", "/@thpstrength1/streams"),
+        ("www.youtube.com", "/channel/" + CHANNEL_ID + "/shorts"),
     ],
 )
 def test_normalizes_supported_hosts_and_trailing_paths(handler, host, path):
+    normalized_path = path.strip("/")
+    if normalized_path.endswith(("/videos", "/streams", "/shorts")):
+        normalized_path = normalized_path.rsplit("/", 1)[0]
     assert handler.validate_channel_url(f"https://{host}{path}?feature=shared") == (
-        f"https://www.youtube.com/{path.strip('/').removesuffix('/videos')}/videos"
+        f"https://www.youtube.com/{normalized_path}/videos"
     )
 
 
@@ -292,6 +297,28 @@ def test_consent_requests_use_bounded_timeouts():
             assert timeout == 10
 
     handle_reject_consent_cookie("https://www.youtube.com/@creator", Session())
+
+
+def test_existing_channel_update_request_error_is_a_clear_cli_error(handler, monkeypatch):
+    handler.channel_name = "Creator"
+    monkeypatch.setattr(handler, "get_channel_id", lambda url: CHANNEL_ID)
+    monkeypatch.setattr(handler, "init_session", lambda url: type("Session", (), {
+        "get": lambda self, *args, **kwargs: (_ for _ in ()).throw(requests.ReadTimeout("Read timed out"))
+    })())
+    monkeypatch.setattr("yt_fts.download.download_handler.check_if_channel_exists", lambda channel_id: True)
+
+    with pytest.raises(click.ClickException, match="Could not get channel name: Read timed out"):
+        handler.download_channel("https://www.youtube.com/@creator")
+
+
+def test_direct_update_request_error_is_a_clear_cli_error(monkeypatch):
+    monkeypatch.setattr(DownloadHandler, "update_channel", lambda self, channel: (_ for _ in ()).throw(
+        click.ClickException("Could not get channel name: Read timed out")
+    ))
+    result = CliRunner().invoke(cli, ["update", "--channel", "Creator"])
+    assert result.exit_code == 1
+    assert "Error: Could not get channel name: Read timed out" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_channel_name_fallback_request_error_is_a_clear_cli_error(handler, monkeypatch):
